@@ -1,4 +1,7 @@
 [project]
 name = "tarc"
-version = "0.0.1dev2"
+version = "0.0.1dev3"
 description = "Manage BT archives"
+
+[project.scripts]
+tarc = "tarc:main"
