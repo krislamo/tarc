@@ -13,145 +13,66 @@ import sys
 import re
 import uuid
 import argparse
-import sqlite3
-
 from datetime import datetime, timezone
 
 import qbittorrent
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker
+
+from .models import Base, Client
 
 # SCHEMA format is YYYYMMDDX
 SCHEMA = 202410060
 
-
-def init_db(conn):
+def init_db(engine):
     """
     Initialize database
     """
-
-    c = conn.cursor()
-    c.executescript(
-        f"""
-        PRAGMA user_version = {SCHEMA};
-
-        CREATE TABLE IF NOT EXISTS clients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            uuid TEXT NOT NULL UNIQUE,
-            endpoint TEXT NOT NULL,
-            last_seen DATETIME NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS torrents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            info_hash_v1 TEXT NOT NULL UNIQUE,
-            info_hash_v2 TEXT UNIQUE,
-            file_count INTEGER NOT NULL,
-            completed_on DATETIME NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS torrent_clients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            torrent_id INTEGER NOT NULL,
-            client_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            content_path TEXT NOT NULL,
-            last_seen DATETIME NOT NULL,
-            FOREIGN KEY (torrent_id) REFERENCES torrents(id),
-            FOREIGN KEY (client_id) REFERENCES clients(id),
-            UNIQUE (torrent_id, client_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS trackers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT NOT NULL UNIQUE,
-            last_seen DATETIME NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS torrent_trackers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            client_id INTEGER NOT NULL,
-            torrent_id INTEGER NOT NULL,
-            tracker_id INTEGER NOT NULL,
-            last_seen DATETIME NOT NULL,
-            FOREIGN KEY (client_id) REFERENCES clients(id),
-            FOREIGN KEY (torrent_id) REFERENCES torrents(id),
-            FOREIGN KEY (tracker_id) REFERENCES trackers(id),
-            UNIQUE (client_id, torrent_id, tracker_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            size INTEGER NOT NULL,
-            oshash TEXT NOT NULL UNIQUE,
-            hash TEXT UNIQUE
-        );
-
-        CREATE TABLE IF NOT EXISTS torrent_files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_id INTEGER NOT NULL,
-            torrent_id INTEGER NOT NULL,
-            client_id INTEGER NOT NULL,
-            file_index INTEGER NOT NULL,
-            file_path TEXT NOT NULL,
-            is_downloaded BOOLEAN NOT NULL,
-            last_checked DATETIME NOT NULL,
-            FOREIGN KEY (file_id) REFERENCES files(id),
-            FOREIGN KEY (torrent_id) REFERENCES torrents(id),
-            FOREIGN KEY (client_id) REFERENCES clients(id),
-            UNIQUE (file_id, torrent_id, client_id, file_index)
-        );
-        """
-    )
-    conn.commit()
-    c.close()
+    # Create all tables first
+    Base.metadata.create_all(engine)
+    
+    # Set the schema version using SQLAlchemy primitives
+    @event.listens_for(engine, 'connect')
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f"PRAGMA user_version = {SCHEMA}")
+        cursor.close()
 
 
-def list_tables(conn):
+def list_tables(engine):
     """
     List all tables in database
     """
-    c = conn.cursor()
-    c.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    table_list = c.fetchall()
-    c.close()
-    return [table[0] for table in table_list]
+    return Base.metadata.tables.keys()
 
 
-def add_client(conn, name, endpoint, last_seen):
+def add_client(session, name, endpoint, last_seen):
     """
     Add a new client endpoint to database
     """
-    c = conn.cursor()
-    c.execute(
-        f"""
-        INSERT INTO clients (uuid, name, endpoint, last_seen)
-        VALUES ("{uuid.uuid4()}", "{name}", "{endpoint}", "{last_seen}");
-        """
+    new_client = Client(
+        uuid=str(uuid.uuid4()),
+        name=name,
+        endpoint=endpoint,
+        last_seen=last_seen
     )
-    conn.commit()
-    c.close()
+    session.add(new_client)
+    session.commit()
 
 
-def find_client(conn, endpoint):
+def find_client(session, endpoint):
     """
     Find existing client
     """
-    c = conn.cursor()
-    c.execute(f'SELECT id, name, uuid FROM clients WHERE endpoint="{endpoint}";')
-    response = c.fetchall()
-    c.close()
-    return response
+    clients = session.query(Client.id, Client.name, Client.uuid).filter(Client.endpoint == endpoint).all()
+    return clients
 
 
-def list_clients(conn):
+def list_clients(session):
     """
     List all stored clients
     """
-    c = conn.cursor()
-    c.execute("SELECT * FROM clients;")
-    rows = c.fetchall()
-    c.close()
-    return rows
+    return session.query(Client).all()
 
 
 def main():
@@ -185,26 +106,42 @@ def main():
         else:
             STORAGE = args.storage
         try:
-            sqlitedb = sqlite3.connect(STORAGE)
-            tables = list_tables(sqlitedb)
-        except sqlite3.DatabaseError as e:
+            engine = create_engine(f"sqlite:///{STORAGE}")
+            tables = list_tables(engine)
+            Session = sessionmaker(bind=engine)
+            session = Session()
+        except Exception as e:
             print(f'[ERROR]: Database Error "{STORAGE}" ({str(e)})')
             sys.exit(1)
         if len(tables) == 0:
             print(f"[INFO]: Initializing database at {STORAGE}")
-            init_db(sqlitedb)
-        cursor = sqlitedb.cursor()
-        cursor.execute("PRAGMA user_version;")
-        SCHEMA_FOUND = cursor.fetchone()[0]
-        cursor.close()
-        if not SCHEMA == SCHEMA_FOUND:
-            print(f"[ERROR]: SCHEMA {SCHEMA_FOUND}, expected {SCHEMA}")
+            init_db(engine)
+
+        # Check schema version using SQLAlchemy primitives
+        schema_found = None
+        
+        @event.listens_for(engine, 'connect')
+        def get_sqlite_pragma(dbapi_connection, connection_record):
+            nonlocal schema_found
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA user_version")
+            schema_found = cursor.fetchone()[0]
+            cursor.close()
+        
+        # Force a connection to trigger the event
+        with engine.connect() as conn:
+            pass
+        
+        if not SCHEMA == schema_found:
+            print(f"[ERROR]: SCHEMA {schema_found}, expected {SCHEMA}")
             sys.exit(1)
         if not args.directory is None:
             print("[INFO]: --directory is not implemented")
             sys.exit(0)
         elif not args.endpoint is None:
             qb = qbittorrent.Client(args.endpoint)
+            if args.username and args.password:
+                qb.login(args.username, args.password)
             if qb.qbittorrent_version is None:
                 print(f'[ERROR]: Couldn\'t find client version at "{args.endpoint}"')
                 sys.exit(1)
@@ -217,14 +154,12 @@ def main():
                 print(
                     f'[INFO]: Found qbittorrent {qb.qbittorrent_version} at "{args.endpoint}"'
                 )
-            clients = find_client(sqlitedb, args.endpoint)
+            clients = find_client(session, args.endpoint)
             if args.confirm_add:
                 if len(clients) == 0:
                     if not args.name is None:
-                        now = datetime.now(timezone.utc).isoformat(
-                            sep=" ", timespec="seconds"
-                        )
-                        add_client(sqlitedb, args.name, args.endpoint, now)
+                        now = datetime.now(timezone.utc)
+                        add_client(session, args.name, args.endpoint, now)
                         print(f"[INFO]: Added client {args.name} ({args.endpoint})")
                     else:
                         print("[ERROR]: Must specify --name for a new client")
@@ -244,6 +179,7 @@ def main():
             elif len(clients) == 1:
                 torrents = qb.torrents()
                 print(f"[INFO]: There are {len(torrents)} torrents\n")
+                
                 for torrent in torrents[:2]:
                     files = qb.get_torrent_files(torrent["hash"])
                     trackers = qb.get_torrent_trackers(torrent["hash"])
