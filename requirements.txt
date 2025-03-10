@@ -1,2 +1,2 @@
-python-qbittorrent==0.4.3
+qbittorrent-api==2025.2.0
 SQLAlchemy==2.0.38

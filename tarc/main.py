@@ -15,7 +15,7 @@ import uuid
 import argparse
 from datetime import datetime, timezone
 
-import qbittorrent
+import qbittorrentapi
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import DatabaseError
@@ -144,19 +144,18 @@ def main():
             print("[INFO]: --directory is not implemented")
             sys.exit(0)
         elif args.endpoint is not None:
-            qb = qbittorrent.Client(args.endpoint)
-            if qb.qbittorrent_version is None:
-                print(f'[ERROR]: Couldn\'t find client version at "{args.endpoint}"')
+            qb = qbittorrentapi.Client(host=args.endpoint,
+                                       username=args.username, password=args.password)
+            try:
+                qb.auth_log_in()
+            except qbittorrentapi.LoginFailed as e:
+                print(f'[ERROR]: Login failed for endpoint "{args.endpoint}": {e}')
                 sys.exit(1)
-            elif not re.match(r"^v?\d+(\.\d+)*$", qb.qbittorrent_version):
-                print(f'[ERROR]: Invalid version found at "{args.endpoint}"')
-                if args.debug:
-                    print(f"[DEBUG]: {qb.qbittorrent_version}")
+            if not re.match(r"^v?\d+(\.\d+)*$", qb.app.version):
+                print(f'[ERROR]: Invalid version "{qb.app.version}" found at "{args.endpoint}"')
                 sys.exit(1)
             else:
-                print(
-                    f'[INFO]: Found qbittorrent {qb.qbittorrent_version} at "{args.endpoint}"'
-                )
+                print(f'[INFO]: Found qBittorrent {qb.app.version} at "{args.endpoint}"')
 
             clients = find_client(engine, args.endpoint)
             if args.confirm_add:
@@ -181,16 +180,16 @@ def main():
                 print("[ERROR]: Use --confirm-add to add a new endpoint")
                 sys.exit(1)
             elif len(clients) == 1:
-                torrents = qb.torrents()
+                torrents = qb.torrents_info()
                 print(f"[INFO]: There are {len(torrents)} torrents\n")
                 for torrent in torrents[:2]:
-                    files = qb.get_torrent_files(torrent["hash"])
-                    trackers = qb.get_torrent_trackers(torrent["hash"])
-                    print(f"[name]: {torrent['name']}")
-                    print(f"[infohash_v1]: {torrent['infohash_v1']}")
-                    print(f"[content_path]: {torrent['content_path']}")
-                    print(f"[magent_uri]: {torrent['magnet_uri'][0:80]}")
-                    print(f"[completed_on]: {torrent['completed']}")
+                    files = qb.torrents_files(torrent.hash)
+                    trackers = qb.torrents_trackers(torrent.hash)
+                    print(f"[name]: {torrent.name}")
+                    print(f"[infohash_v1]: {torrent.hash}")
+                    print(f"[content_path]: {torrent.content_path}")
+                    print(f"[magnet_uri]: {torrent.magnet_uri[:80]}")
+                    print(f"[completed_on]: {torrent.completed}\n")
                     print(f"[trackers]: {len(trackers)}")
                     print(f"[file_count]: {len(files)}\n")
                     if args.debug:
