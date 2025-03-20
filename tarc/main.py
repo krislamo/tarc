@@ -19,7 +19,7 @@ import qbittorrentapi
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session
 
-from .models import Base, SchemaVersion, Client
+from .models import Base, SchemaVersion, Client, Torrent, TorrentFile
 
 # SCHEMA format is YYYYMMDDX
 SCHEMA = 202503100
@@ -101,27 +101,61 @@ def auth_qbittorrent(endpoint, username, password):
     return qb
 
 
-def scan_torrents(qb_client, debug=False):
+def scan_torrents(qb_client, engine):
     """
     Scan torrents using the provided qBittorrent client.
     """
     torrents = qb_client.torrents_info()
-    print(f"[INFO]: There are {len(torrents)} torrents\n")
-    for torrent in torrents[:2]:
-        files = qb_client.torrents_files(torrent.hash)
-        trackers = qb_client.torrents_trackers(torrent.hash)
-        print(f"[name]: {torrent.name}")
-        print(f"[infohash_v1]: {torrent.hash}")
-        print(f"[content_path]: {torrent.content_path}")
-        print(f"[magnet_uri]: {torrent.magnet_uri[:80]}")
-        print(f"[completed_on]: {torrent.completed}\n")
-        print(f"[trackers]: {len(trackers)}")
-        print(f"[file_count]: {len(files)}\n")
-        if debug:
-            print(f"[DEBUG]: {repr(torrent)}")
-            for elem in trackers:
-                print(f"[DEBUG]: Tracker {repr(elem)}")
-            print("\n", end="")
+
+    with Session(engine) as session:
+        for torrent in torrents:
+            files = qb_client.torrents_files(torrent.hash)
+            torrent_instance = (
+                session.query(Torrent).filter_by(info_hash_v1=torrent.hash).first()
+            )
+            if not torrent_instance:
+                completed_on = (
+                    datetime.fromtimestamp(torrent.completed)
+                    if torrent.completed
+                    else None
+                )
+                torrent_instance = Torrent(
+                    info_hash_v1=torrent.hash,
+                    file_count=len(files),
+                    completed_on=completed_on,
+                )
+                session.add(torrent_instance)
+                session.commit()
+                torrent_instance = (
+                    session.query(Torrent).filter_by(info_hash_v1=torrent.hash).first()
+                )
+                if not torrent_instance:
+                    print(f"[ERROR]: Can't find just added torrent {torrent.name}")
+                    raise ValueError(f"Can't find {torrent.hash}")
+
+            file_counter = 0
+            for file in files:
+                if (
+                    not session.query(TorrentFile)
+                    .filter_by(file_path=file.name)
+                    .first()
+                ):
+                    torrent_file_instance = TorrentFile(
+                        torrent_id=torrent_instance.id,
+                        file_id=file.id,
+                        client_id=1,
+                        file_index=file.index,
+                        file_path=file.name,
+                        is_downloaded=file.progress == 1,
+                        last_checked=datetime.now(timezone.utc),
+                    )
+                    session.add(torrent_file_instance)
+                    file_counter += 1
+            session.commit()
+            if file_counter > 0:
+                print(torrent.hash)
+            else:
+                print(f"[CHECKED]: {torrent.name}")
 
 
 def scan(args, engine):
@@ -135,7 +169,7 @@ def scan(args, engine):
             qb_client = auth_qbittorrent(
                 client_info.endpoint, args.username, args.password
             )
-            scan_torrents(qb_client, debug=args.debug)
+            scan_torrents(qb_client, engine)
         elif len(clients) == 0:
             raise ValueError(
                 f'Client with name "{args.name}" not found. '

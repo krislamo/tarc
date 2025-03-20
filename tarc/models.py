@@ -42,7 +42,17 @@ class Torrent(Base):  # pylint: disable=too-few-public-methods
     info_hash_v1 = Column(String, nullable=False, unique=True)
     info_hash_v2 = Column(String, unique=True)
     file_count = Column(Integer, nullable=False)
-    completed_on = Column(DateTime, nullable=False)
+    completed_on = Column(DateTime)
+
+    def __repr__(self):
+        """Return a string representation of the Torrent object."""
+        return (
+            f"Torrent(id={self.id}, "
+            f"info_hash_v1='{self.info_hash_v1}', "
+            f"info_hash_v2='{self.info_hash_v2}', "
+            f"file_count={self.file_count}, "
+            f"completed_on='{self.completed_on}')"
+        )
 
 
 class TorrentClient(Base):  # pylint: disable=too-few-public-methods
