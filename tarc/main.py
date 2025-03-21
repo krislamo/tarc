@@ -115,8 +115,8 @@ def scan_torrents(qb_client, engine):
             )
             if not torrent_instance:
                 completed_on = (
-                    datetime.fromtimestamp(torrent.completed)
-                    if torrent.completed
+                    datetime.fromtimestamp(torrent.completion_on)
+                    if torrent.completion_on
                     else None
                 )
                 torrent_instance = Torrent(
@@ -154,7 +154,7 @@ def scan_torrents(qb_client, engine):
             session.commit()
             if file_counter > 0:
                 print(torrent.hash)
-            else:
+            elif torrent.progress == 1:
                 print(f"[CHECKED]: {torrent.name}")
 
 
